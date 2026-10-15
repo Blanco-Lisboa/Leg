@@ -56,6 +56,21 @@ async function lerInstancia(cred: Cred, inst: string) {
   return { http: r.http, result: String(r.j?.result ?? ""), motivo: String(r.j?.result_message ?? ""), dados: d, config: cfg, webhook: String(cfg.webhook_url ?? "") };
 }
 
+async function lerTelefone(cred: Cred, inst: string) {
+  const r = await gw(cred, "PhoneList", {});
+  const lista = Array.isArray(r.j) ? r.j : [];
+  const f = lista.find((x: Record<string, unknown>) => String(x?.phone_number ?? "") === String(cred.telefone ?? "") && String(x?.w_instancia_id ?? "") === String(inst)) ?? null;
+  return { http: r.http, achou: !!f, descricao: String(f?.description ?? ""), status: f?.status ?? null, webhook: String(f?.webhook_url ?? "") };
+}
+
+async function trocarWebhookTelefone(cred: Cred, inst: string, descricao: string, url: string) {
+  return await gw(cred, "PhoneUpdate", { phone_number: String(cred.telefone ?? ""), w_instancia_id: Number(inst) || inst, description: descricao, webhook: { url } });
+}
+
+function resumoTel(t: Awaited<ReturnType<typeof lerTelefone>>) {
+  return { http: t.http, achou: t.achou, status: t.status, webhook: descrever(t.webhook) };
+}
+
 function resumo(l: Awaited<ReturnType<typeof lerInstancia>>) {
   const cfg: Record<string, unknown> = {};
   for (const k of CAMPOS_CONFIG) if (k in l.config) cfg[k] = l.config[k];
@@ -63,13 +78,6 @@ function resumo(l: Awaited<ReturnType<typeof lerInstancia>>) {
     http: l.http, result: l.result, motivo: l.motivo, status: l.dados?.status ?? null, numero: l.dados?.number ?? null, tipo: l.dados?.type ?? null,
     config: cfg, chaves_config: Object.keys(l.config), webhook: descrever(l.webhook),
   };
-}
-
-async function trocarWebhook(cred: Cred, inst: string, atual: Record<string, unknown>, url: string) {
-  const config: Record<string, unknown> = {};
-  for (const k of CAMPOS_CONFIG) if (k in atual) config[k] = atual[k];
-  config.webhook_url = url;
-  return await gw(cred, "InstanceUpdate", { w_instancia_id: Number(inst) || inst, config });
 }
 
 // acoes
@@ -89,21 +97,21 @@ Deno.serve(async (req) => {
 
   if (p.acao === "ler") {
     const l = await lerInstancia(cred, inst);
+    const t = await lerTelefone(cred, inst);
     let guardado = false;
-    const d = descrever(l.webhook) as Record<string, unknown>;
+    const d = descrever(t.webhook) as Record<string, unknown>;
     if (d.definido && !d.eh_nosso && !d.invalido) {
-      const g = await sb.rpc("wa_gw_webhook_antigo_guardar", { p_numero: p.numero_id, p_url: l.webhook });
+      const g = await sb.rpc("wa_gw_webhook_antigo_guardar", { p_numero: p.numero_id, p_url: t.webhook });
       guardado = g.data === true;
     }
-    return json({ ok: l.result === "success", instancia: resumo(l), antigo_guardado: guardado });
+    return json({ ok: l.result === "success" && t.achou, instancia: resumo(l), telefone: resumoTel(t), antigo_guardado: guardado });
   }
 
   if (p.acao === "apontar") {
-    const l = await lerInstancia(cred, inst);
-    if (l.result !== "success") return json({ ok: false, erro: "GetInstance falhou", instancia: resumo(l) }, 502);
-    if (!("webhook_url" in l.config)) return json({ ok: false, erro: "a instancia nao informa webhook_url; nada foi trocado", instancia: resumo(l) }, 409);
+    const l = await lerTelefone(cred, inst);
+    if (!l.achou) return json({ ok: false, erro: "telefone nao encontrado no PhoneList; nada foi trocado", telefone: resumoTel(l) }, 502);
     const d = descrever(l.webhook) as Record<string, unknown>;
-    if (d.eh_nosso) return json({ ok: true, ja_apontado: true, instancia: resumo(l) });
+    if (d.eh_nosso) return json({ ok: true, ja_apontado: true, telefone: resumoTel(l) });
     if (!d.definido || d.invalido) return json({ ok: false, erro: "webhook atual vazio ou invalido; sem destino para o repasse; nada foi trocado" }, 409);
     const g = await sb.rpc("wa_gw_webhook_antigo_guardar", { p_numero: p.numero_id, p_url: l.webhook });
     if (g.data !== true) return json({ ok: false, erro: "nao guardou o webhook antigo; nada foi trocado" }, 500);
@@ -127,11 +135,11 @@ Deno.serve(async (req) => {
       return json({ ok: false, erro: "teste do repasse para o Tauri falhou; nada foi trocado", teste_http: teste, repasse_http: http, repasse_resposta: resp }, 502);
     }
     await sb.rpc("wa_gw_repasse_testado", { p_numero: p.numero_id });
-    const t = await trocarWebhook(cred, inst, l.config, nosso);
-    const depois = await lerInstancia(cred, inst);
+    const t = await trocarWebhookTelefone(cred, inst, l.descricao, nosso);
+    const depois = await lerTelefone(cred, inst);
     if (depois.webhook !== nosso) {
-      const volta = await trocarWebhook(cred, inst, l.config, l.webhook);
-      const conf = await lerInstancia(cred, inst);
+      const volta = await trocarWebhookTelefone(cred, inst, l.descricao, l.webhook);
+      const conf = await lerTelefone(cred, inst);
       return json({
         ok: false, erro: "o WhatsGW nao gravou o endereco novo; voltei o antigo",
         troca: { http: t.http, result: t.j?.result, motivo: t.j?.result_message }, volta: { http: volta.http, result: volta.j?.result },
@@ -139,20 +147,20 @@ Deno.serve(async (req) => {
       }, 502);
     }
     await sb.rpc("wa_gw_virada_marcar", { p_numero: p.numero_id, p_ligada: true });
-    return json({ ok: true, teste_repasse: { http, resposta: resp }, instancia: resumo(depois) });
+    return json({ ok: true, teste_repasse: { http, resposta: resp }, telefone: resumoTel(depois) });
   }
 
   if (p.acao === "voltar") {
     const a = await sb.rpc("wa_gw_webhook_antigo", { p_numero: p.numero_id });
     const antigo = String(a.data ?? "");
     if (!antigo) return json({ ok: false, erro: "sem webhook antigo guardado" }, 409);
-    const l = await lerInstancia(cred, inst);
-    if (l.result !== "success") return json({ ok: false, erro: "GetInstance falhou", instancia: resumo(l) }, 502);
-    const t = await trocarWebhook(cred, inst, l.config, antigo);
-    const depois = await lerInstancia(cred, inst);
+    const l = await lerTelefone(cred, inst);
+    if (!l.achou) return json({ ok: false, erro: "telefone nao encontrado no PhoneList", telefone: resumoTel(l) }, 502);
+    const t = await trocarWebhookTelefone(cred, inst, l.descricao, antigo);
+    const depois = await lerTelefone(cred, inst);
     const voltou = depois.webhook === antigo;
     if (voltou) await sb.rpc("wa_gw_virada_marcar", { p_numero: p.numero_id, p_ligada: false });
-    return json({ ok: voltou, troca: { http: t.http, result: t.j?.result, motivo: t.j?.result_message }, instancia: resumo(depois) }, voltou ? 200 : 502);
+    return json({ ok: voltou, troca: { http: t.http, result: t.j?.result, motivo: t.j?.result_message }, telefone: resumoTel(depois) }, voltou ? 200 : 502);
   }
 
   return json({ ok: false, erro: "acao" }, 400);
