@@ -7,11 +7,22 @@ const NOSSO = "ynqcmzukahkmqbvirlkb.supabase.co";
 
 type Cred = { base_url: string; apikey: string; telefone: string };
 
+const GW_SO_HTTP = new Set(["app.whatsgw.com.br", "pooling.whatsgw.com.br"]);
+async function buscarGw(url: string, init: RequestInit) {
+  const seguro = url.replace(/^http:\/\//i, "https://");
+  try {
+    return await fetch(seguro, init);
+  } catch (e) {
+    const host = new URL(seguro).host.toLowerCase();
+    if (!GW_SO_HTTP.has(host) || !/\(Connect\)/.test(String((e as Error)?.message ?? ""))) throw e;
+    return await fetch(seguro.replace(/^https:/i, "http:"), init);
+  }
+}
 // gateway
 async function gw(cred: Cred, metodo: string, corpo: Record<string, unknown>) {
-  const alvo = String(cred.base_url).replace(/^https:\/\//i, "http://").replace(/\/+$/, "") + "/WhatsGw/" + metodo;
+  const alvo = String(cred.base_url).replace(/\/+$/, "") + "/WhatsGw/" + metodo;
   try {
-    const r = await fetch(alvo, {
+    const r = await buscarGw(alvo, {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ apikey: cred.apikey, ...corpo }), signal: AbortSignal.timeout(20000),
     });

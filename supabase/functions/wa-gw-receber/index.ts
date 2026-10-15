@@ -99,6 +99,26 @@ function chamadaDe(c: URLSearchParams, saida: boolean) {
   return `Chamada de ${video ? "vídeo" : "voz"} ${saida ? "feita" : "recebida"}${dur > 0 ? ` (${dur}s)` : " (não atendida)"}`;
 }
 
+const GW_SO_HTTP = new Set(["app.whatsgw.com.br", "pooling.whatsgw.com.br"]);
+async function buscarGw(url: string, init: RequestInit) {
+  const seguro = url.replace(/^http:\/\//i, "https://");
+  try {
+    return await fetch(seguro, init);
+  } catch (e) {
+    const host = new URL(seguro).host.toLowerCase();
+    if (!GW_SO_HTTP.has(host) || !/\(Connect\)/.test(String((e as Error)?.message ?? ""))) throw e;
+    return await fetch(seguro.replace(/^https:/i, "http:"), init);
+  }
+}
+const DOMINIOS_MIDIA = ["whatsapp.net", "whatsapp.com", "fbcdn.net", "whatsgw.com.br", "kndtec.com.br"];
+function linkPermitido(v: string) {
+  try {
+    const u = new URL(v);
+    const h = u.hostname.toLowerCase();
+    return u.protocol === "https:" && DOMINIOS_MIDIA.some((d) => h === d || h.endsWith("." + d));
+  } catch { return false; }
+}
+
 // repasse
 type Repasse = { ok: boolean; http: number; ms: number; resposta: string };
 async function repassar(numero: string, bruto: Uint8Array, ct: string): Promise<Repasse | null> {
@@ -212,8 +232,8 @@ async function processar(numero: string, eventoId: number | null, campos: URLSea
     if (/^https?:\/\//i.test(inicio)) {
       const link = textoDe(bruto, regiao[0], Math.min(regiao[1], regiao[0] + 8192)).trim();
       try {
-        const b = await fetch(link, { signal: AbortSignal.timeout(60000) })
-          .catch((e) => /^https:/i.test(link) ? fetch(link.replace(/^https:/i, "http:"), { signal: AbortSignal.timeout(60000) }) : Promise.reject(e));
+        if (!linkPermitido(link)) { await falha("link de arquivo fora dos domínios do provedor", "midia por link recusada"); return; }
+        const b = await fetch(link, { redirect: "manual", signal: AbortSignal.timeout(60000) });
         const tam = Number(b.headers.get("content-length") ?? "0");
         if (!b.ok || tam > LIMITE) { await falha(b.ok ? "arquivo acima do limite" : `link respondeu ${b.status}`, "midia por link falhou"); return; }
         dados = new Uint8Array(await b.arrayBuffer());
@@ -244,8 +264,8 @@ const FOTO_MAX = 5 * 1024 * 1024;
 async function chamarGw(numero: string, metodo: string, corpo: Record<string, unknown>, base?: string) {
   const cred = await sb.rpc("wa_gw_credencial", { p_numero: numero });
   if (cred.error || !cred.data?.apikey || !cred.data?.telefone) return null;
-  const raiz = (base ?? String(cred.data.base_url)).replace(/^https:\/\//i, "http://").replace(/\/+$/, "");
-  const r = await fetch(raiz + "/WhatsGw/" + metodo, {
+  const raiz = (base ?? String(cred.data.base_url)).replace(/\/+$/, "");
+  const r = await buscarGw(raiz + "/WhatsGw/" + metodo, {
     method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ apikey: cred.data.apikey, phone_number: String(cred.data.telefone).replace(/\D/g, ""), ...corpo }),
     signal: AbortSignal.timeout(20000),
@@ -261,8 +281,8 @@ async function pedirFotos(numero: string) {
     if (pode.error || pode.data !== true) return;
     const cred = await sb.rpc("wa_gw_credencial", { p_numero: numero });
     if (cred.error || !cred.data?.apikey || !cred.data?.telefone) return;
-    const alvo = String(cred.data.base_url).replace(/^https:\/\//i, "http://").replace(/\/+$/, "") + "/WhatsGw/GetAllChats";
-    await fetch(alvo, {
+    const alvo = String(cred.data.base_url).replace(/\/+$/, "") + "/WhatsGw/GetAllChats";
+    await buscarGw(alvo, {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ apikey: cred.data.apikey, phone_number: String(cred.data.telefone).replace(/\D/g, "") }),
       signal: AbortSignal.timeout(20000),
@@ -277,7 +297,7 @@ async function guardarFotos(numero: string, eventoId: number | null, corpo: Reco
     for (const c of lista) {
       const tel = String(c?.id ?? "").replace(/\D/g, "");
       const url = String(c?.contact?.profilePicThumbObj?.previewEurl ?? "");
-      if (tel && /^https:\/\//i.test(url)) links.set(tel, url);
+      if (tel && linkPermitido(url)) links.set(tel, url);
     }
     if (!links.size) { await fechar(true, null); return; }
     const alvos = await sb.rpc("wa_gw_foto_alvos", { p_numero: numero, p_telefones: [...links.keys()] });
@@ -285,7 +305,7 @@ async function guardarFotos(numero: string, eventoId: number | null, corpo: Reco
     let feitas = 0, falhas = 0;
     for (const a of (alvos.data as { telefone: string; contato_id: string; conversa_id: string }[]).slice(0, 300)) {
       try {
-        const r = await fetch(links.get(a.telefone)!, { signal: AbortSignal.timeout(15000) });
+        const r = await fetch(links.get(a.telefone)!, { redirect: "manual", signal: AbortSignal.timeout(15000) });
         const tipo = (r.headers.get("content-type") ?? "").toLowerCase();
         if (!r.ok || !tipo.startsWith("image/")) { falhas++; continue; }
         const img = new Uint8Array(await r.arrayBuffer());
@@ -412,7 +432,7 @@ async function buscarEventos(numero: string) {
   try {
     const pode = await sb.rpc("wa_gw_eventos_pode", { p_numero: numero });
     if (pode.error || pode.data !== true) return;
-    const g = await chamarGw(numero, "GetEvents", {}, "http://pooling.whatsgw.com.br/api");
+    const g = await chamarGw(numero, "GetEvents", {}, "https://pooling.whatsgw.com.br/api");
     if (!g || !g.r.ok) return;
     const j = await g.r.json().catch(() => null);
     const lista: unknown[] = Array.isArray(j) ? j : Array.isArray(j?.events) ? j.events : Array.isArray(j?.data) ? j.data : [];

@@ -25,13 +25,24 @@ const comExtensao = (nome: string, mime: string) => {
   return e ? `${n}.${e}` : n;
 };
 
+const GW_SO_HTTP = new Set(["app.whatsgw.com.br", "pooling.whatsgw.com.br"]);
+async function buscarGw(url: string, init: RequestInit) {
+  const seguro = url.replace(/^http:\/\//i, "https://");
+  try {
+    return await fetch(seguro, init);
+  } catch (e) {
+    const host = new URL(seguro).host.toLowerCase();
+    if (!GW_SO_HTTP.has(host) || !/\(Connect\)/.test(String((e as Error)?.message ?? ""))) throw e;
+    return await fetch(seguro.replace(/^https:/i, "http:"), init);
+  }
+}
 // gateway
 async function gateway(base: string, corpo: Record<string, unknown>, tempo: number) {
-  const alvo = base.replace(/^https:\/\//i, "http://").replace(/\/+$/, "") + "/WhatsGw/Send";
+  const alvo = base.replace(/\/+$/, "") + "/WhatsGw/Send";
   const aborto = new AbortController();
   const relogio = setTimeout(() => aborto.abort(), tempo);
   try {
-    const r = await fetch(alvo, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(corpo), signal: aborto.signal });
+    const r = await buscarGw(alvo, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(corpo), signal: aborto.signal });
     const t = await r.text();
     let j: Record<string, unknown> | null = null;
     try { j = JSON.parse(t); } catch { j = null; }

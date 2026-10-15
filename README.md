@@ -14,7 +14,7 @@ Este repositório guarda o que é só do Legal.
 
 ## WhatsApp (WhatsGW) — pronto; apontamento junto com o Tauri depende só da chave
 - Número: (11) 96567-0720, instância WhatsGW 130989 (`wa_numero` + `wa_gw_conexao`).
-- Endereço do WhatsGW: `http://app.whatsgw.com.br/api`. Do servidor do Supabase o HTTPS do WhatsGW é recusado ("connection reset"); só HTTP responde (o Tauri também usa HTTP).
+- Endereço do WhatsGW: `https://app.whatsgw.com.br/api`. Sempre tenta HTTPS primeiro. Do servidor do Supabase, o HTTPS de `app.whatsgw.com.br` e `pooling.whatsgw.com.br` é recusado na abertura da conexão (testado 4 vezes em 15/10/2026); só nesses 2 endereços, e só quando a conexão nem abriu, a mesma chamada é refeita em HTTP (`buscarGw`). Links de mídia e fotos: só HTTPS, só domínios do provedor ou do WhatsApp, sem seguir redirecionamento.
 - Funções:
   - `wa-gw-receber`: recebe do WhatsGW e repassa o mesmo corpo, sem mudar nada, para o webhook antigo (Tauri) quando o repasse está ligado. Entende direção pelo `message_state`/`message_direction`, reação (`context_type=1`), resposta (`context_type=2`), apagada/editada pelo contato, arquivo `file`, contato, localização, chamada, `phonestate`, `account_health`, `groups`, mídia que chega como link, e guarda o corpo pequeno para reprocessar quando chegar o próximo aviso.
   - `wa-gw-enviar`: envia com `check_status=1`, `message_custom_id` = id da tela, áudio de voz como `ptt` (OGG/Opus), prévia de link, motivo da recusa em `result_message`; fila por conversa (`na_fila`) liberada pelo banco quando a anterior chega ao servidor do WhatsApp.

@@ -10,13 +10,24 @@ const CORS = {
 };
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
+const GW_SO_HTTP = new Set(["app.whatsgw.com.br", "pooling.whatsgw.com.br"]);
+async function buscarGw(url: string, init: RequestInit) {
+  const seguro = url.replace(/^http:\/\//i, "https://");
+  try {
+    return await fetch(seguro, init);
+  } catch (e) {
+    const host = new URL(seguro).host.toLowerCase();
+    if (!GW_SO_HTTP.has(host) || !/\(Connect\)/.test(String((e as Error)?.message ?? ""))) throw e;
+    return await fetch(seguro.replace(/^https:/i, "http:"), init);
+  }
+}
 // gateway
 async function gateway(base: string, metodo: string, corpo: Record<string, unknown>, formulario = false) {
-  const alvo = base.replace(/^https:\/\//i, "http://").replace(/\/+$/, "") + "/WhatsGw/" + metodo;
+  const alvo = base.replace(/\/+$/, "") + "/WhatsGw/" + metodo;
   try {
     const form = new URLSearchParams();
     if (formulario) for (const [k, v] of Object.entries(corpo)) form.set(k, String(v));
-    const r = await fetch(alvo, {
+    const r = await buscarGw(alvo, {
       method: "POST", headers: { "Content-Type": formulario ? "application/x-www-form-urlencoded" : "application/json", Accept: "application/json" },
       body: formulario ? form.toString() : JSON.stringify(corpo), signal: AbortSignal.timeout(20000),
     });
