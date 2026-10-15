@@ -62,6 +62,9 @@ Deno.serve(async (req) => {
     apikey: cred.data.apikey, phone_number: String(cred.data.telefone).replace(/\D/g, ""),
     contact_phone_number: String(d.destino).replace(/\D/g, ""), message_type: TIPO_GW[p.tipo ?? "texto"] ?? "text", message_custom_id: p.id_local,
   };
+  if (d.grupo) pedido.message_to_group = 1;
+  const citada = String(p.responder_a ?? "").trim();
+  if (citada && !citada.startsWith("imp:")) pedido.quoted = { key: { id: citada } };
   let tempo = 20000;
   if ((p.tipo ?? "texto") === "texto") {
     pedido.message_body = p.texto;

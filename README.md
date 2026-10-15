@@ -14,8 +14,15 @@ Este repositório guarda o que é só do Legal.
 
 ## WhatsApp (WhatsGW) — pronto, falta só a virada
 - Número: (11) 96567-0720, instância WhatsGW 130989 (`wa_numero` + `wa_gw_conexao`).
-- Funções: `supabase/functions/wa-gw-receber` (recebe do WhatsGW) e `wa-gw-enviar` (envia).
+- Funções: `supabase/functions/wa-gw-receber` (recebe do WhatsGW), `wa-gw-enviar` (envia; repassa a mensagem citada em `quoted.key.id` e marca `message_to_group` em grupo), `wa-gw-acao` (apagar com `DeleteMessage`, editar com `Send`+`edit.key.id`, reagir com `Send`+`react.key.id`, marcar como lida só no sistema) e `wa-transcrever` (áudio recebido vira texto pelo conversor da VPS).
+- Banco: `wa_gw_acao_preparar` (usuário) e `wa_gw_acao_resultado` (servidor); apagar ou editar mensagem de outra pessoa exige a permissão `wa_mensagem_qualquer`.
+- Fotos de perfil: ao chegar mensagem de contato sem foto, o recebimento pede `GetAllChats` (no máximo 1 vez a cada 30 minutos, só depois da virada); o WhatsGW devolve o evento `chats` no mesmo webhook e as fotos vão para `wa-midia/<conversa_id>/perfil.jpg` (`wa_contato.foto_url`).
+- Transcrição: gatilho `trg_wa_midia_transcrever` chama `wa-transcrever` com a chave do cofre `wa_transcrever_chave`; a função usa a variável `CONVERSOR_BILLY_CHAVE` da Edge. Sem as duas, nada é chamado.
 - Antes da virada o envio responde "O WhatsApp da Legalização ainda não foi ligado ao sistema." e o recebimento recusa tudo (sem token).
+
+### Para ligar a transcrição (segredos, só com o William)
+1. Criar no cofre do banco do Legal o segredo `wa_transcrever_chave` (valor novo, aleatório).
+2. Criar na Edge do Legal a variável `CONVERSOR_BILLY_CHAVE` com o mesmo valor que já está na Edge do Fiscal e na VPS.
 
 ### Passos da virada (só com o "pode" do William)
 1. Guardar a chave do WhatsGW no cofre do banco do Legal com o nome `wa_gw_apikey`.

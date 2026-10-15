@@ -87,6 +87,7 @@ async function processar(numero: string, eventoId: number | null, campos: URLSea
       },
     });
     if (r.error) { await fechar(false, r.error.message); return; }
+    if (!grupo && !r.data?.repetida && !/sent|send|fromme/i.test(evento)) await pedirFotos(numero);
     const midia = r.data?.midia_id as string | undefined;
     if (!ehMidia || !midia) { await fechar(true, null); return; }
     if (!regiao || regiao[1] <= regiao[0]) {
@@ -116,6 +117,59 @@ async function processar(numero: string, eventoId: number | null, campos: URLSea
   }
 }
 
+// fotos
+const FOTO_MAX = 5 * 1024 * 1024;
+async function pedirFotos(numero: string) {
+  try {
+    const pode = await sb.rpc("wa_gw_foto_pedir", { p_numero: numero });
+    if (pode.error || pode.data !== true) return;
+    const cred = await sb.rpc("wa_gw_credencial", { p_numero: numero });
+    if (cred.error || !cred.data?.apikey || !cred.data?.telefone) return;
+    const alvo = String(cred.data.base_url).replace(/^http:\/\//i, "https://").replace(/\/+$/, "") + "/WhatsGw/GetAllChats";
+    await fetch(alvo, {
+      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ apikey: cred.data.apikey, phone_number: String(cred.data.telefone).replace(/\D/g, "") }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch { return; }
+}
+async function guardarFotos(numero: string, eventoId: number | null, corpo: Record<string, unknown>) {
+  const fechar = async (ok: boolean, erro: string | null) => {
+    if (eventoId !== null) await sb.from("wa_webhook_evento").update({ processado_ok: ok, processado_em: new Date().toISOString(), erro }).eq("id", eventoId);
+  };
+  try {
+    const lista = Array.isArray(corpo.chats) ? corpo.chats as Record<string, any>[] : [];
+    const links = new Map<string, string>();
+    for (const c of lista) {
+      const tel = String(c?.id ?? "").replace(/\D/g, "");
+      const url = String(c?.contact?.profilePicThumbObj?.previewEurl ?? "");
+      if (tel && /^https:\/\//i.test(url)) links.set(tel, url);
+    }
+    if (!links.size) { await fechar(true, null); return; }
+    const alvos = await sb.rpc("wa_gw_foto_alvos", { p_numero: numero, p_telefones: [...links.keys()] });
+    if (alvos.error) { await fechar(false, alvos.error.message); return; }
+    let feitas = 0, falhas = 0;
+    for (const a of (alvos.data as { telefone: string; contato_id: string; conversa_id: string }[]).slice(0, 300)) {
+      try {
+        const r = await fetch(links.get(a.telefone)!, { signal: AbortSignal.timeout(15000) });
+        const tipo = (r.headers.get("content-type") ?? "").toLowerCase();
+        if (!r.ok || !tipo.startsWith("image/")) { falhas++; continue; }
+        const img = new Uint8Array(await r.arrayBuffer());
+        if (!img.length || img.length > FOTO_MAX) { falhas++; continue; }
+        const caminho = `${a.conversa_id}/perfil.jpg`;
+        const up = await sb.storage.from("wa-midia").upload(caminho, img, { contentType: "image/jpeg", upsert: true });
+        if (up.error) { falhas++; continue; }
+        const s = await sb.rpc("wa_gw_foto_salvar", { p_contato: a.contato_id, p_caminho: caminho });
+        if (s.error || s.data !== true) { falhas++; continue; }
+        feitas++;
+      } catch (_) { falhas++; }
+    }
+    await fechar(falhas === 0, falhas ? `fotos: ${feitas} guardadas, ${falhas} falharam` : null);
+  } catch (e) {
+    await fechar(false, String(e).slice(0, 500));
+  }
+}
+
 // entrada
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false }, 405);
@@ -125,6 +179,21 @@ Deno.serve(async (req) => {
   if (n.error || !n.data) return json({ ok: false }, 401);
   const numero = n.data as string;
   const bruto = new Uint8Array(await req.arrayBuffer());
+  const rt = (globalThis as unknown as { EdgeRuntime?: { waitUntil: (p: Promise<unknown>) => void } }).EdgeRuntime;
+  let i0 = 0;
+  while (i0 < bruto.length && (bruto[i0] === 32 || bruto[i0] === 9 || bruto[i0] === 10 || bruto[i0] === 13)) i0++;
+  if (bruto[i0] === 123) {
+    let corpo: Record<string, unknown> = {};
+    try { corpo = JSON.parse(new TextDecoder().decode(bruto)); } catch { corpo = {}; }
+    const tipoEv = String(corpo.event ?? "");
+    const evj = await sb.from("wa_webhook_evento").insert({ numero_id: numero, tipo: "whatsgw", bytes_corpo: bruto.length, tinha_midia: false, id_evento: null }).select("id").maybeSingle();
+    const idEv = evj.data?.id ?? null;
+    const tarefaJson = tipoEv === "chats"
+      ? guardarFotos(numero, idEv, corpo)
+      : (idEv !== null ? sb.from("wa_webhook_evento").update({ processado_ok: true, processado_em: new Date().toISOString(), erro: `evento ${tipoEv.slice(0, 40) || "json"} sem uso` }).eq("id", idEv).then(() => {}) : Promise.resolve());
+    if (rt?.waitUntil) rt.waitUntil(tarefaJson); else await tarefaJson;
+    return json({ ok: true });
+  }
   let campos = new URLSearchParams();
   let regiao: [number, number] | null = null;
   const achado = acharChave(bruto, "message_body");
@@ -140,7 +209,6 @@ Deno.serve(async (req) => {
   }
   const ev = await sb.from("wa_webhook_evento").insert({ numero_id: numero, tipo: "whatsgw", bytes_corpo: bruto.length, tinha_midia: !!regiao, id_evento: null }).select("id").maybeSingle();
   const tarefa = processar(numero, ev.data?.id ?? null, campos, bruto, regiao);
-  const rt = (globalThis as unknown as { EdgeRuntime?: { waitUntil: (p: Promise<unknown>) => void } }).EdgeRuntime;
   if (rt?.waitUntil) rt.waitUntil(tarefa); else await tarefa;
   return json({ ok: true });
 });
