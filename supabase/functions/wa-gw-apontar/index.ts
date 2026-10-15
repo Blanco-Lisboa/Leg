@@ -63,8 +63,8 @@ async function lerTelefone(cred: Cred, inst: string) {
   return { http: r.http, achou: !!f, descricao: String(f?.description ?? ""), status: f?.status ?? null, webhook: String(f?.webhook_url ?? "") };
 }
 
-async function trocarWebhookTelefone(cred: Cred, inst: string, descricao: string, url: string) {
-  return await gw(cred, "PhoneUpdate", { phone_number: String(cred.telefone ?? ""), w_instancia_id: Number(inst) || inst, description: descricao, webhook: { url } });
+async function trocarWebhookTelefone(cred: Cred, descricao: string, url: string) {
+  return await gw(cred, "PhoneUpdate", { phone_number: String(cred.telefone ?? ""), description: descricao, webhook: { url } });
 }
 
 function resumoTel(t: Awaited<ReturnType<typeof lerTelefone>>) {
@@ -135,10 +135,10 @@ Deno.serve(async (req) => {
       return json({ ok: false, erro: "teste do repasse para o Tauri falhou; nada foi trocado", teste_http: teste, repasse_http: http, repasse_resposta: resp }, 502);
     }
     await sb.rpc("wa_gw_repasse_testado", { p_numero: p.numero_id });
-    const t = await trocarWebhookTelefone(cred, inst, l.descricao, nosso);
+    const t = await trocarWebhookTelefone(cred, l.descricao, nosso);
     const depois = await lerTelefone(cred, inst);
     if (depois.webhook !== nosso) {
-      const volta = await trocarWebhookTelefone(cred, inst, l.descricao, l.webhook);
+      const volta = await trocarWebhookTelefone(cred, l.descricao, l.webhook);
       const conf = await lerTelefone(cred, inst);
       return json({
         ok: false, erro: "o WhatsGW nao gravou o endereco novo; voltei o antigo",
@@ -156,7 +156,7 @@ Deno.serve(async (req) => {
     if (!antigo) return json({ ok: false, erro: "sem webhook antigo guardado" }, 409);
     const l = await lerTelefone(cred, inst);
     if (!l.achou) return json({ ok: false, erro: "telefone nao encontrado no PhoneList", telefone: resumoTel(l) }, 502);
-    const t = await trocarWebhookTelefone(cred, inst, l.descricao, antigo);
+    const t = await trocarWebhookTelefone(cred, l.descricao, antigo);
     const depois = await lerTelefone(cred, inst);
     const voltou = depois.webhook === antigo;
     if (voltou) await sb.rpc("wa_gw_virada_marcar", { p_numero: p.numero_id, p_ligada: false });
