@@ -4,7 +4,6 @@ const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE
   auth: { persistSession: false },
 });
 const CONVERSOR = "https://conversor.it-ia.tec.br/transcrever";
-const CHAVE = Deno.env.get("CONVERSOR_BILLY_CHAVE") ?? Deno.env.get("conversor_billy_chave") ?? "";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIMITE = 25 * 1024 * 1024;
 
@@ -36,7 +35,6 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false }, 405);
   const conf = await admin.rpc("wa_transcrever_chave_ok", { p_chave: req.headers.get("x-chave-interna") ?? "" });
   if (conf.error || conf.data !== true) return json({ ok: false }, 401);
-  if (!CHAVE) return json({ ok: false, erro: "transcritor sem chave" }, 500);
   let corpo: { midia_id?: string };
   try { corpo = await req.json(); } catch { return json({ ok: false }, 400); }
   const id = String(corpo.midia_id ?? "");
@@ -47,6 +45,9 @@ Deno.serve(async (req) => {
   const md = m.data;
   if (md.tipo !== "audio" || md.estado !== "guardado" || !md.caminho) return json({ ok: false, erro: "nao e audio guardado" }, 409);
   if (md.transcricao) return json({ ok: true, repetida: true });
+  const ck = await admin.rpc("wa_conversor_chave");
+  const chave = ck.error ? "" : String(ck.data ?? "");
+  if (!chave) return json({ ok: false, erro: "transcritor sem chave" }, 503);
 
   let audio: Blob;
   try {
@@ -66,7 +67,7 @@ Deno.serve(async (req) => {
   form.append("arquivo", new File([audio], "audio." + extensao(md.mimetype, md.caminho), { type: md.mimetype || "audio/ogg" }));
   let texto = "";
   try {
-    const r = await fetch(CONVERSOR, { method: "POST", headers: { "x-chave": CHAVE }, body: form, signal: AbortSignal.timeout(120000) });
+    const r = await fetch(CONVERSOR, { method: "POST", headers: { "x-chave": chave }, body: form, signal: AbortSignal.timeout(120000) });
     const corpoResp = await r.text();
     if (!r.ok) throw new Error("conversor " + r.status + " " + corpoResp.slice(0, 200));
     let j: Record<string, unknown> = {};
