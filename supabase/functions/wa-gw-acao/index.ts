@@ -11,18 +11,22 @@ const CORS = {
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
 // gateway
-async function gateway(base: string, metodo: string, corpo: Record<string, unknown>) {
-  const alvo = base.replace(/^http:\/\//i, "https://").replace(/\/+$/, "") + "/WhatsGw/" + metodo;
+async function gateway(base: string, metodo: string, corpo: Record<string, unknown>, formulario = false) {
+  const alvo = base.replace(/^https:\/\//i, "http://").replace(/\/+$/, "") + "/WhatsGw/" + metodo;
   try {
+    const form = new URLSearchParams();
+    if (formulario) for (const [k, v] of Object.entries(corpo)) form.set(k, String(v));
     const r = await fetch(alvo, {
-      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(corpo), signal: AbortSignal.timeout(20000),
+      method: "POST", headers: { "Content-Type": formulario ? "application/x-www-form-urlencoded" : "application/json", Accept: "application/json" },
+      body: formulario ? form.toString() : JSON.stringify(corpo), signal: AbortSignal.timeout(20000),
     });
     const t = await r.text();
     let j: Record<string, unknown> | null = null;
     try { j = JSON.parse(t); } catch { j = null; }
     const res = String(j?.result ?? "").toLowerCase();
-    if (r.ok && (res === "success" || res.includes("wait result on event"))) return { ok: true };
+    const motivo = String(j?.result_message ?? "").toLowerCase();
+    if (r.ok && res === "success") return { ok: true, pendente: false };
+    if (r.ok && (res.includes("wait result on event") || motivo.includes("wait result on event"))) return { ok: true, pendente: true };
     return { ok: false, erro: String(j?.result_message ?? j?.message ?? `WhatsGW respondeu ${r.status}`).slice(0, 300) };
   } catch (e) {
     const nome = (e as Error)?.name ?? "";
@@ -65,19 +69,19 @@ Deno.serve(async (req) => {
     if (cred.error || !cred.data?.apikey || !cred.data?.telefone) return json({ ok: false, erro: "O WhatsApp da Legalização ainda não foi ligado ao sistema." }, 409);
     const base = String(cred.data.base_url);
     const origem = String(cred.data.telefone).replace(/\D/g, "");
-    const destino = String(d.destino ?? "").replace(/\D/g, "");
+    const bruto = String(d.destino ?? "").replace(/[^\d-]/g, "");
+    const destino = d.grupo && !bruto.includes("-") && bruto.length > 18 ? bruto.slice(0, -10) + "-" + bruto.slice(-10) : bruto;
     const envio = (extra: Record<string, unknown>) => ({
       apikey: cred.data.apikey, phone_number: origem, contact_phone_number: destino,
-      message_custom_id: crypto.randomUUID(), message_type: "text", ...(d.grupo ? { message_to_group: 1 } : {}), ...extra,
+      message_custom_id: crypto.randomUUID(), message_type: "text", check_status: "1", ...(d.grupo ? { message_to_group: 1 } : {}), ...extra,
     });
     let r;
 
     switch (p.acao) {
       case "reagir": {
-        const emoji = String(p.emoji ?? "");
-        if (!emoji) return json({ ok: false, erro: "Tirar a reação não está disponível neste WhatsApp." }, 400);
+        const emoji = String(p.emoji ?? "").trim();
         if ([...emoji].length > 16) return json({ ok: false, erro: "emoji invalido" }, 400);
-        r = await gateway(base, "Send", envio({ message_body: emoji, react: { key: { id: d.waid } } }));
+        r = await gateway(base, "Send", envio({ message_body: emoji || " ", "react.key.id": d.waid }), true);
         if (!r.ok) return json({ ok: false, erro: r.erro }, 422);
         await fim({ emoji });
         return json({ ok: true });
@@ -92,6 +96,7 @@ Deno.serve(async (req) => {
       case "apagar": {
         r = await gateway(base, "DeleteMessage", { apikey: cred.data.apikey, phone_number: origem, message_id: d.id_provedor });
         if (!r.ok) return json({ ok: false, erro: r.erro }, 422);
+        if (r.pendente) return json({ ok: true, pendente: true });
         const eu = await usuario.auth.getUser();
         await fim({ por: eu.data.user?.id ?? null });
         return json({ ok: true });
